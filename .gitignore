@@ -1,0 +1,19 @@
+# DB (개인 데이터 포함)
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 환경변수
+.env
+
+# Claude Code 개인 설정
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
