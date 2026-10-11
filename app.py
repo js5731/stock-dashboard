@@ -7,11 +7,13 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
 
 from engine import db, pricing
 from engine.data import get_provider
 
 BASE = Path(__file__).resolve().parent
+load_dotenv(BASE / ".env")  # 환경변수가 이미 있으면 덮어쓰지 않음
 DB_PATH = os.environ.get("STOCK_DB", str(BASE / "data" / "app.db"))
 SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL")
 PROVIDER = os.environ.get("STOCK_PROVIDER", "sample")

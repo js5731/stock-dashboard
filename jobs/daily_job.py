@@ -12,11 +12,14 @@ import os
 from datetime import date
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from engine import db
 from engine.data import DATA_DIR, get_provider
 from engine.selection import build_recommendations, parse_headlines
 
 BASE = Path(__file__).resolve().parent.parent
+load_dotenv(BASE / ".env")  # 환경변수가 이미 있으면 덮어쓰지 않음
 DEFAULT_DB = os.environ.get("STOCK_DB", str(BASE / "data" / "app.db"))
 SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL")
 

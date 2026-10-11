@@ -3,5 +3,6 @@ pandas>=2.0
 numpy>=1.26
 pytest>=8.0
 psycopg2-binary>=2.9
+python-dotenv>=1.0
 # optional: finance-datareader (real market data)
 # optional: supabase (Supabase client SDK)
