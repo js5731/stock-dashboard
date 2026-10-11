@@ -13,7 +13,11 @@ from engine.data import get_provider
 
 BASE = Path(__file__).resolve().parent
 DB_PATH = os.environ.get("STOCK_DB", str(BASE / "data" / "app.db"))
+SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL")
 PROVIDER = os.environ.get("STOCK_PROVIDER", "sample")
+
+if SUPABASE_DB_URL:
+    from engine import db_pg as db  # type: ignore[assignment]
 MAX_FAILS = 5
 
 st.set_page_config(page_title="추천 종목", page_icon="📈", layout="wide")
@@ -139,7 +143,7 @@ def render_main(conn) -> None:
 
 
 def main() -> None:
-    conn = db.connect(DB_PATH)
+    conn = db.connect(SUPABASE_DB_URL or DB_PATH)
     try:
         if st.session_state.get("user"):
             render_main(conn)

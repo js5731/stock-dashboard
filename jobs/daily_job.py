@@ -18,6 +18,10 @@ from engine.selection import build_recommendations, parse_headlines
 
 BASE = Path(__file__).resolve().parent.parent
 DEFAULT_DB = os.environ.get("STOCK_DB", str(BASE / "data" / "app.db"))
+SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL")
+
+if SUPABASE_DB_URL:
+    from engine import db_pg as db  # type: ignore[assignment]
 DEMO_USER, DEMO_PASSWORD = "demo", "demo1234"
 
 
@@ -26,7 +30,7 @@ def run(db_path: str, news_text: str, provider_name: str, regime_override: str |
     recs, meta = build_recommendations(
         parse_headlines(news_text), provider, run_date, regime_override=regime_override
     )
-    conn = db.connect(db_path)
+    conn = db.connect(SUPABASE_DB_URL or db_path)
     db.save_run(conn, run_date.isoformat(), meta["regime"], provider.name, recs)
     conn.close()
 
@@ -53,7 +57,7 @@ def main() -> None:
     run_date = date.fromisoformat(args.date) if args.date else date.today()
     if args.demo:
         news_path = DATA_DIR / "sample_news.txt"
-        conn = db.connect(args.db)
+        conn = db.connect(SUPABASE_DB_URL or args.db)
         db.create_user(conn, DEMO_USER, DEMO_PASSWORD)
         conn.close()
         print(f"데모 계정 생성: {DEMO_USER} / {DEMO_PASSWORD}  (테스트 전용, 반드시 삭제/변경)")

@@ -2,4 +2,6 @@ streamlit>=1.50
 pandas>=2.0
 numpy>=1.26
 pytest>=8.0
-# 실제 시세를 쓰려면(선택): finance-datareader
+psycopg2-binary>=2.9
+# optional: finance-datareader (real market data)
+# optional: supabase (Supabase client SDK)
