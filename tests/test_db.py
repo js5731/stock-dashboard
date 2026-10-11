@@ -52,3 +52,31 @@ def test_entries_are_per_user_and_blank_deletes(conn):
     db.save_entry(conn, "u1", "2026-10-09", "A", None, None)
     assert db.get_entries(conn, "u1", "2026-10-09") == {}
     assert "A" in db.get_entries(conn, "u2", "2026-10-09")  # 다른 사용자 데이터는 그대로
+
+
+def test_role_defaults_to_user_and_admin_survives_password_reset(conn):
+    db.create_user(conn, "kim", "password-1")
+    assert db.get_role(conn, "kim") == "user"
+    db.create_user(conn, "kim", "password-2", "admin")
+    assert db.get_role(conn, "kim") == "admin"
+    db.create_user(conn, "kim", "password-3")  # role 생략 → 관리자 유지
+    assert db.get_role(conn, "kim") == "admin"
+    assert db.verify_user(conn, "kim", "password-3")
+
+
+def test_invalid_role_rejected_and_unknown_user_is_user(conn):
+    with pytest.raises(ValueError):
+        db.create_user(conn, "x", "password-1", "root")
+    assert db.get_role(conn, "nobody") == "user"
+
+
+def test_existing_db_without_role_column_is_migrated(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE users (username TEXT PRIMARY KEY, salt TEXT NOT NULL, pw_hash TEXT NOT NULL)")
+    old.commit(); old.close()
+    c = db.connect(path)
+    db.create_user(c, "a", "password-1")
+    assert db.get_role(c, "a") == "user"
+    c.close()

@@ -10,13 +10,16 @@ import psycopg2
 import psycopg2.extras
 
 PBKDF2_ROUNDS = 200_000
+ROLES = ("user", "admin")
 
 _SCHEMA_STMTS = [
     """CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY,
         salt TEXT NOT NULL,
-        pw_hash TEXT NOT NULL
+        pw_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin'))
     )""",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'",
     """CREATE TABLE IF NOT EXISTS runs (
         run_date TEXT PRIMARY KEY,
         regime TEXT,
@@ -64,17 +67,28 @@ def _hash(password: str, salt: bytes) -> str:
     return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PBKDF2_ROUNDS).hex()
 
 
-def create_user(conn, username: str, password: str) -> None:
+def create_user(conn, username: str, password: str, role: str | None = None) -> None:
+    """계정 생성/비밀번호 갱신. role을 생략하면 신규는 'user', 기존 계정은 역할을 유지한다."""
     if not username or len(password) < 8:
         raise ValueError("ID는 필수이며 비밀번호는 8자 이상이어야 합니다.")
+    if role is not None and role not in ROLES:
+        raise ValueError(f"role은 {ROLES} 중 하나여야 합니다.")
     salt = os.urandom(16)
     with conn.cursor() as cur:
         cur.execute(
-            """INSERT INTO users(username, salt, pw_hash) VALUES (%s, %s, %s)
-               ON CONFLICT (username) DO UPDATE SET salt = EXCLUDED.salt, pw_hash = EXCLUDED.pw_hash""",
-            (username, salt.hex(), _hash(password, salt)),
+            """INSERT INTO users(username, salt, pw_hash, role) VALUES (%s, %s, %s, COALESCE(%s, 'user'))
+               ON CONFLICT (username) DO UPDATE SET salt = EXCLUDED.salt, pw_hash = EXCLUDED.pw_hash,
+               role = COALESCE(%s, users.role)""",
+            (username, salt.hex(), _hash(password, salt), role, role),
         )
     conn.commit()
+
+
+def get_role(conn, username: str) -> str:
+    with conn.cursor() as cur:
+        cur.execute("SELECT role FROM users WHERE username = %s", (username,))
+        row = cur.fetchone()
+    return row["role"] if row and row["role"] in ROLES else "user"
 
 
 def verify_user(conn, username: str, password: str) -> bool:

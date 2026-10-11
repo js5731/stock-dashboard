@@ -153,3 +153,21 @@ def test_lockout_after_five_failures(app_db):
     at = _login(at, "tester", "test-pass-123")  # 올바른 비번이라도 차단
     assert "user" not in at.session_state
     assert any("초과" in e.value for e in at.error)
+
+
+def test_admin_role_is_loaded_at_login(app_db):
+    conn = db.connect(app_db)
+    db.create_user(conn, "boss", "boss-pass-123", "admin")
+    conn.close()
+    at = _logged_in("boss", "boss-pass-123")
+    assert at.session_state["role"] == "admin"
+    assert any("관리자" in m.value for m in at.sidebar.markdown)
+    _button(at, "로그아웃").click()
+    at.run()
+    assert "role" not in at.session_state
+
+
+def test_normal_user_role_is_user(app_db):
+    at = _logged_in()
+    assert at.session_state["role"] == "user"
+    assert not any("관리자" in m.value for m in at.sidebar.markdown)

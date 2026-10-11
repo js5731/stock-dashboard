@@ -47,6 +47,7 @@ def render_login(conn) -> None:
             st.error("로그인 시도 횟수를 초과했습니다. 브라우저를 새로 열어 다시 시도해 주세요.")
         elif db.verify_user(conn, username, password):
             st.session_state["user"] = username
+            st.session_state["role"] = db.get_role(conn, username)
             st.session_state["fails"] = 0
             st.rerun()
         else:
@@ -83,9 +84,10 @@ def build_table(recs, entries) -> pd.DataFrame:
 def render_main(conn) -> None:
     user = st.session_state["user"]
     with st.sidebar:
-        st.write(f"**{user}** 님")
+        st.write(f"**{user}** 님" + (" (관리자)" if st.session_state.get("role") == "admin" else ""))
         if st.button("로그아웃"):
             st.session_state.pop("user", None)
+            st.session_state.pop("role", None)
             st.rerun()
 
     st.title("📈 오늘의 추천 종목")

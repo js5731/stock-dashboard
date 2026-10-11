@@ -9,12 +9,14 @@ from datetime import datetime
 from pathlib import Path
 
 PBKDF2_ROUNDS = 200_000
+ROLES = ("user", "admin")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     username TEXT PRIMARY KEY,
     salt TEXT NOT NULL,
-    pw_hash TEXT NOT NULL
+    pw_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin'))
 );
 CREATE TABLE IF NOT EXISTS runs (
     run_date TEXT PRIMARY KEY,
@@ -55,6 +57,9 @@ def connect(path: str | os.PathLike) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    if "role" not in {r["name"] for r in conn.execute("PRAGMA table_info(users)")}:  # 기존 DB 이전
+        conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+        conn.commit()
     return conn
 
 
@@ -62,15 +67,25 @@ def _hash(password: str, salt: bytes) -> str:
     return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PBKDF2_ROUNDS).hex()
 
 
-def create_user(conn: sqlite3.Connection, username: str, password: str) -> None:
+def create_user(conn: sqlite3.Connection, username: str, password: str, role: str | None = None) -> None:
+    """계정 생성/비밀번호 갱신. role을 생략하면 신규는 'user', 기존 계정은 역할을 유지한다."""
     if not username or len(password) < 8:
         raise ValueError("ID는 필수이며 비밀번호는 8자 이상이어야 합니다.")
+    if role is not None and role not in ROLES:
+        raise ValueError(f"role은 {ROLES} 중 하나여야 합니다.")
     salt = os.urandom(16)
     conn.execute(
-        "INSERT OR REPLACE INTO users(username, salt, pw_hash) VALUES (?,?,?)",
-        (username, salt.hex(), _hash(password, salt)),
+        """INSERT INTO users(username, salt, pw_hash, role) VALUES (?,?,?,COALESCE(?, 'user'))
+           ON CONFLICT(username) DO UPDATE SET salt=excluded.salt, pw_hash=excluded.pw_hash,
+           role=COALESCE(?, users.role)""",
+        (username, salt.hex(), _hash(password, salt), role, role),
     )
     conn.commit()
+
+
+def get_role(conn: sqlite3.Connection, username: str) -> str:
+    row = conn.execute("SELECT role FROM users WHERE username=?", (username,)).fetchone()
+    return row["role"] if row and row["role"] in ROLES else "user"
 
 
 def verify_user(conn: sqlite3.Connection, username: str, password: str) -> bool:

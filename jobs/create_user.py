@@ -20,14 +20,19 @@ if SUPABASE_DB_URL:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        sys.exit("사용법: python -m jobs.create_user <ID>")
+    args = sys.argv[1:]
+    role = None
+    if len(args) == 3 and args[1] == "--role":
+        role = args[2]
+        args = args[:1]
+    if len(args) != 1 or (role is not None and role not in db.ROLES):
+        sys.exit("사용법: python -m jobs.create_user <ID> [--role user|admin]")
     pw = getpass.getpass("비밀번호(8자 이상): ")
     if pw != getpass.getpass("비밀번호 확인: "):
         sys.exit("비밀번호가 일치하지 않습니다.")
     conn = db.connect(SUPABASE_DB_URL or DB_PATH)
-    db.create_user(conn, sys.argv[1], pw)
-    print(f"계정 '{sys.argv[1]}' 저장 완료")
+    db.create_user(conn, args[0], pw, role)
+    print(f"계정 '{args[0]}' 저장 완료 (role={db.get_role(conn, args[0])})")
 
 
 if __name__ == "__main__":
