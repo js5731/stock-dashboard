@@ -2,7 +2,10 @@
 
 ## 프로젝트 개요
 뉴스 헤드라인으로 국내주식 추천 종목을 고르고, 매수·매도·손절가를 계산해 보여주는 **개인용** 웹앱 (Streamlit + SQLite).
-화면 1: 로그인 / 화면 2: 추천 표(의견, 매수가, 매도가, 손절가, 실구매가, 현재가, 수익률).
+화면 1: 로그인 / 화면 2: 사이드바 Menu(Overview·Analysis·Object) + 우측 상세. 역할 `admin`은 전 메뉴, `user`는 Overview만.
+- Overview: 추천 표(구분, 의견, 매수가, 매도가, 손절가, 실구매가, 현재가, 수익률, 선정 사유, 비고)
+- Analysis(admin): 종목 입력 → 기업 현황·주가 차트·추천 이력 (wisereport 재무 항목은 미연동)
+- Object(admin): Overview에 표시되는 추천 종목 추가·수정·삭제 (실구매가·현재가·수익률은 다루지 않음)
 목표는 **무료 운영**. 매일 아침 배치가 미리 계산해 DB에 저장하고, 화면은 읽기만 한다. 배치 주기는 관리자가 정할 수 있고, 수동 요청 가능 
 현재 단계: 프로토타입(샘플 시세). 실제 돈을 넣기 전에 백테스트와 모의 운영 검증이 선행되어야 한다.
 
@@ -13,15 +16,16 @@ python -m jobs.daily_job --demo                    # 샘플 추천 + 데모 계�
 python -m jobs.daily_job --news-file news.txt      # 직접 붙여넣은 헤드라인으로 실행
 python -m jobs.create_user <ID>                    # 계정 생성 (비밀번호는 프롬프트)
 streamlit run app.py                               # http://localhost:8501
-python -m pytest -q                                # 전체 테스트 (44개)
+python -m pytest -q                                # 전체 테스트 (70개)
 ```
 
 ## 구조
-- `app.py` — 로그인 + 추천 표 (data_editor로 실구매가·현재가 입력 후 [저장])
+- `app.py` — 로그인 + 메뉴(`render_menu`) → `render_overview` / `render_analysis` / `render_object`. Overview는 data_editor로 실구매가·현재가·비고 입력 후 **[저장] 버튼을 눌러야 저장**(자동저장 없음)
 - `engine/pricing.py` — 호가단위, ATR, 매수·목표·손절가, 수익률 (순수 함수)
 - `engine/selection.py` — 뉴스 점수 → 시장 국면 → 안전 필터 → 종합 점수 → 가격 산출
-- `engine/data.py` — 시세 제공자: `SampleProvider`(기본, 가짜 시세), `FdrProvider`(선택, 미검증)
-- `engine/db.py` — SQLite 스키마, PBKDF2 비밀번호 해시, 추천·사용자 입력 저장
+- `engine/manage.py` — Object 입력 검증(`validate_recommendation`, 가격 불변식)
+- `engine/data.py` — 시세 제공자: `SampleProvider`(기본, 가짜 시세), `FdrProvider`(선택, 미검증), `KiwoomQuote`(현재가 조회 전용, 키 검증 못 함)
+- `engine/db.py`, `engine/db_pg.py` — SQLite / Supabase(Postgres, `SUPABASE_DB_URL` 설정 시) 저장소. **두 파일은 같은 함수 집합을 유지**해야 한다 (한쪽만 고치지 말 것). PBKDF2 비밀번호 해시, 추천·사용자 입력 저장
 - `jobs/` — 매일 배치(`daily_job`), 계정 생성(`create_user`)
 - `data/keywords.csv` 뉴스 키워드→섹터→방향·가중치, `universe.csv` 종목-섹터, `blocklist.csv` 제외 종목
 - `tests/` — pricing, selection, db 단위 테스트 + Streamlit AppTest
@@ -36,6 +40,10 @@ python -m pytest -q                                # 전체 테스트 (44개)
 7. **가중치·계수 변경**: `selection.py`의 `WEIGHTS`, `SIGNAL_THRESHOLD`, `REGIME_PARAMS`와 `pricing.py`의 ATR 계수는 검증 전 가설값이다. 바꿀 때는 근거(백테스트 결과)를 남기고 관련 테스트를 함께 갱신한다.
 8. **기준 예시 테스트 유지**: 전일종가 50,000 / ATR 1,500 → 매수 49,550 / 목표 51,800 / 손절 48,050 (`test_worked_example_from_plan`).
 
+9. **메뉴 권한**: `MENUS`의 최소 역할 기준으로 `admin`만 Analysis·Object에 접근한다. 화면 숨김과 별개로 `render_menu`에서 서버 측 재확인을 유지한다.
+10. **관리자 삭제 규칙**: 관리자가 추천을 삭제해도, 실구매가를 입력한 사용자 화면에는 그 종목이 남는다(`recommendations.removed=1`, 구분 열 🟠). 실구매가 입력자가 없으면 완전 삭제하고 실구매가 없는 사용자 입력은 정리한다. 사용자 화면은 `get_user_recommendations`, 관리자 화면은 `get_recommendations`를 쓴다.
+11. **비고**: `user_entries.note`는 사용자별 자유 입력이며 다른 사용자에게 보이면 안 된다 (규칙 4와 동일).
+
 ## 코딩 규칙
 - Python 3.11+, 타입 힌트와 `from __future__ import annotations` 사용. 계산 로직은 `engine/`에 두고 `app.py`에는 화면 코드만 둔다.
 - `engine/`은 Streamlit에 의존하지 않는다 (테스트와 배치에서 재사용).
@@ -45,7 +53,11 @@ python -m pytest -q                                # 전체 테스트 (44개)
 
 ## 알려진 한계 / 다음 작업
 - 시세는 기본이 가짜(난수) 데이터. `FdrProvider`는 구현만 되어 있고 실행 검증을 못 했다.
-- 토스증권 오픈API 연동 없음 (문서의 호출 한도·약관 확인 후 추가). saveticker 뉴스 자동 수집 없음 (이용약관 확인 필요, 불가 시 수동 붙여넣기).
+- 키움 REST 현재가 조회(`KiwoomQuote`)는 문서 기준 구현이며 실제 키 호출은 검증하지 못했다. 토스증권 오픈API 연동 없음 (문서의 호출 한도·약관 확인 후 추가).
+- Analysis는 시세·추천 이력만 보여준다. wisereport 같은 재무제표·컨센서스는 데이터 출처·약관 확인 전이라 미연동.
+- `engine/` 수정 후 Streamlit 서버가 이전 모듈을 캐시해 `AttributeError`가 날 수 있다 → 서버 재시작.
+- `tests/test_app.py::test_query_button_without_keys_shows_error`는 `.env`에 키움 키가 있으면 실패한다 (`load_dotenv`가 테스트의 `delenv`를 덮어씀). 미수정.
+- Supabase용 `db_pg.py` 쿼리(삭제 플래그·비고·관리 함수)는 실제 DB로 실행 검증하지 못했다 (테스트는 SQLite만). saveticker 뉴스 자동 수집 없음 (이용약관 확인 필요, 불가 시 수동 붙여넣기).
 - 시장 국면은 지수 20일선만 사용 (환율·미국 선물 미반영).
 - 로그인 시도 제한은 세션 단위라 보안으로 불충분 → 공개 전 Supabase Auth 등으로 교체.
 - SQLite는 임시 실행 환경에서 유지되지 않음 → 무료 배포 시 Supabase(Postgres)로 교체.
