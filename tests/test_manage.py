@@ -100,3 +100,34 @@ def test_api_prev_close_without_history_skips_price_plan():
 
     r = suggest_from_code("005930", NoHist(), _uni(), _FakeQuote(prev=70_000))
     assert r["prev_close"] == 70_000 and "buy_price" not in r
+
+
+def test_msg_when_no_api_keys():
+    from engine.manage import suggest_from_code
+    r = suggest_from_code("005930", _FakeProvider(), _uni(), None)
+    assert any("API 키" in m for m in r["api_msgs"])
+
+
+def test_msgs_explain_api_failure_with_reason():
+    from engine.manage import suggest_from_code
+
+    q = _FakeQuote()
+    q.last_error = "ka10001: 권한 없음"
+    r = suggest_from_code("999999", _FakeProvider(), _uni(), q)  # CSV에도 없는 종목
+    text = " ".join(r["api_msgs"])
+    assert "종목명을 조회하지 못했습니다" in text and "직접 입력" in text
+    assert "전일종가를 조회하지 못했습니다" in text and "현재가를 조회하지 못했습니다" in text
+    assert "권한 없음" in text  # 실패 사유 표시
+    assert "시세 제공자" in text
+
+
+def test_no_msgs_when_api_fully_succeeds():
+    from engine.manage import suggest_from_code
+    r = suggest_from_code("005930", _FakeProvider(), _uni(), _FakeQuote({"name": "삼성전자", "sector": "전기전자"}, prev=70_000))
+    assert r["api_msgs"] == []
+
+
+def test_current_price_fallback_message():
+    from engine.manage import suggest_from_code
+    r = suggest_from_code("005930", _FakeProvider(), _uni(), _FakeQuote({"name": "a", "sector": "b"}, cur=80_000))
+    assert any("현재가를 전일종가 칸에 넣었습니다" in m for m in r["api_msgs"])

@@ -144,6 +144,7 @@ class KiwoomQuote:
         if not self.appkey or not self.secretkey:
             raise RuntimeError("KIWOOM_APPKEY / KIWOOM_SECRETKEY 환경변수가 설정되지 않았습니다.")
         self._token: str | None = None
+        self.last_error: str | None = None  # 마지막 조회 실패 사유 (화면 안내용)
 
     def _post(self, path: str, body: dict, headers: dict | None = None) -> dict:
         import json
@@ -169,55 +170,53 @@ class KiwoomQuote:
             self._token = res["token"]
         return self._token
 
-    def latest_price(self, code: str) -> Optional[int]:
-        """현재가(원). 조회 실패 시 None. 응답의 부호(+/-)는 전일대비 방향이므로 제거한다."""
+    def _call(self, api_id: str, code: str) -> Optional[dict]:
+        """stkinfo 계열 조회. 실패하면 None을 돌려주고 사유를 last_error에 남긴다."""
         try:
             res = self._post(
                 "/api/dostk/stkinfo",
                 {"stk_cd": code},
-                {"authorization": f"Bearer {self._get_token()}", "api-id": "ka10001"},
+                {"authorization": f"Bearer {self._get_token()}", "api-id": api_id},
             )
-            if res.get("return_code", 0) != 0:
-                return None
-            price = abs(int(str(res["cur_prc"]).replace(",", "")))
-            return price or None
-        except Exception:
+        except Exception as e:  # 네트워크·토큰·JSON 오류 등
+            self.last_error = f"{api_id}: {type(e).__name__}: {e}"
             return None
+        if res.get("return_code", 0) != 0:
+            self.last_error = f"{api_id}: {res.get('return_msg') or res.get('return_code')}"
+            return None
+        return res
+
+    def _price_field(self, field: str, code: str) -> Optional[int]:
+        res = self._call("ka10001", code)
+        if res is None:
+            return None
+        try:
+            return abs(int(str(res[field]).replace(",", ""))) or None
+        except (KeyError, ValueError):
+            self.last_error = f"ka10001: 응답에 '{field}' 값이 없거나 숫자가 아닙니다"
+            return None
+
+    def latest_price(self, code: str) -> Optional[int]:
+        """현재가(원). 조회 실패 시 None. 응답의 부호(+/-)는 전일대비 방향이므로 제거한다."""
+        return self._price_field("cur_prc", code)
 
     def prev_close(self, code: str) -> Optional[int]:
         """전일종가(원). ka10001 응답의 기준가(base_pric)를 쓴다. 조회 실패 시 None.
         ※ base_pric 가 전일종가라는 것은 문서 기억에 의존한 추정이며 실제 호출 검증은 못 했다."""
-        try:
-            res = self._post(
-                "/api/dostk/stkinfo",
-                {"stk_cd": code},
-                {"authorization": f"Bearer {self._get_token()}", "api-id": "ka10001"},
-            )
-            if res.get("return_code", 0) != 0:
-                return None
-            return abs(int(str(res["base_pric"]).replace(",", ""))) or None
-        except Exception:
-            return None
+        return self._price_field("base_pric", code)
 
     def stock_info(self, code: str) -> dict:
         """종목명·업종(섹터) 조회 (ka10100 종목정보 조회). 찾지 못하면 빈 dict.
         ※ 응답 필드명(name, upName)은 공식 문서로 확인하지 못한 추정이며 실제 호출 검증도 못 했다.
         업종을 못 받으면 종목명만 ka10001의 stk_nm 으로 보완한다."""
-        headers = lambda api: {"authorization": f"Bearer {self._get_token()}", "api-id": api}  # noqa: E731
         out: dict = {}
-        try:
-            res = self._post("/api/dostk/stkinfo", {"stk_cd": code}, headers("ka10100"))
-            if res.get("return_code", 0) == 0:
-                out = {"name": (res.get("name") or "").strip(), "sector": (res.get("upName") or "").strip()}
-        except Exception:
-            pass
+        res = self._call("ka10100", code)
+        if res is not None:
+            out = {"name": (res.get("name") or "").strip(), "sector": (res.get("upName") or "").strip()}
         if not out.get("name"):
-            try:
-                res = self._post("/api/dostk/stkinfo", {"stk_cd": code}, headers("ka10001"))
-                if res.get("return_code", 0) == 0 and res.get("stk_nm"):
-                    out["name"] = str(res["stk_nm"]).strip()
-            except Exception:
-                pass
+            res = self._call("ka10001", code)
+            if res is not None and res.get("stk_nm"):
+                out["name"] = str(res["stk_nm"]).strip()
         return {k: v for k, v in out.items() if v}
 
 

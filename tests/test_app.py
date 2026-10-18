@@ -440,3 +440,15 @@ def test_object_autofill_prev_close_from_api_then_current_price(app_db, monkeypa
     assert v == 91_000
     at, v = fill(None, 95_000)
     assert v == 95_000 and any("현재가" in w.value for w in at.warning)
+
+
+def test_object_autofill_shows_api_failure_messages(app_db):
+    uni = load_universe()
+    code = uni[~uni["code"].isin(_codes(app_db))].iloc[0]["code"]
+    at = _object_page(app_db)  # 오프라인 가짜 키움: 모든 조회가 빈 결과
+    _button(at, "종목 추가").click()
+    at.run()
+    {t.label: t for t in at.text_input}["종목코드 (6자리)"].set_value(code)
+    at.run()
+    texts = " ".join(w.value for w in at.warning)
+    assert "종목명을 조회하지 못했습니다" in texts and "전일종가를 조회하지 못했습니다" in texts

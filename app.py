@@ -351,11 +351,21 @@ def _render_object_form(conn, run_date: str, recs, current) -> None:
                 quote = get_provider("kiwoom")  # 키가 있으면 API로 종목명·섹터 조회
             except RuntimeError:
                 quote = None
-            vals = manage.suggest_from_code(code, get_provider(PROVIDER), load_universe(), quote)
-            if not vals:
+            try:
+                vals = manage.suggest_from_code(code, get_provider(PROVIDER), load_universe(), quote)
+            except AttributeError as e:  # 배포 환경에서만 나는 오류의 원인 파악용 (비밀 정보는 출력하지 않는다)
+                import sys
+
+                st.error(
+                    f"자동 채움 실패: {e!r}\n\nmanage 파일: `{getattr(manage, '__file__', '?')}`\n\n"
+                    f"manage 공개 이름: `{[n for n in dir(manage) if not n.startswith('_')]}`\n\n"
+                    f"Python {sys.version.split()[0]}, Streamlit {st.__version__}, PROVIDER={PROVIDER}"
+                )
+                vals = {}
+            for m in vals.get("api_msgs", []):
+                st.warning(m)
+            if not any(k != "api_msgs" for k in vals):
                 st.info("종목 정보를 찾지 못했습니다. 직접 입력해 주세요.")
-            elif vals.get("prev_source") == "현재가":
-                st.warning("전일종가를 조회하지 못해 현재가를 전일종가 칸에 넣었습니다. 확인 후 수정하세요.")
             elif not get_provider(PROVIDER).is_real:
                 st.error("⚠️ 샘플(가짜) 시세로 채운 값입니다. 실제 가격이 아니니 반드시 확인·수정하세요.")
             else:

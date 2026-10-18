@@ -52,3 +52,18 @@ def test_prev_close_uses_base_price(monkeypatch):
 def test_prev_close_failure_returns_none(monkeypatch):
     q = _q(monkeypatch, [{"token": "t"}, {"return_code": 1}])
     assert q.prev_close("005930") is None
+
+
+def test_last_error_records_reason(monkeypatch):
+    q = _q(monkeypatch, [{"token": "t"}, {"return_code": 1, "return_msg": "조회 권한이 없습니다"}])
+    assert q.prev_close("005930") is None
+    assert "조회 권한이 없습니다" in q.last_error
+
+
+def test_last_error_on_network_exception(monkeypatch):
+    q = KiwoomQuote(appkey="a", secretkey="b")
+    def boom(*a, **k):
+        raise OSError("timeout")
+    monkeypatch.setattr(q, "_post", boom)
+    assert q.latest_price("005930") is None
+    assert "timeout" in q.last_error
