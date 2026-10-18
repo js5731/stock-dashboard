@@ -12,7 +12,7 @@ from jobs.daily_job import run
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
 RUN_DATE = "2026-10-09"
-EXPECTED_COLS = ["종목", "의견", "매수가", "매도가", "손절가", "실구매가", "현재가", "수익률(%)", "선정 사유"]
+EXPECTED_COLS = ["구분", "종목", "의견", "매수가", "매도가", "손절가", "실구매가", "현재가", "수익률(%)", "선정 사유", "비고"]
 
 
 @pytest.fixture
@@ -120,20 +120,35 @@ def test_save_button_keeps_existing_entries(app_db):
     assert entries[codes[0]]["actual_price"] == 100_000.0
 
 
-def test_auto_fill_current_price_keeps_actual(app_db):
+def test_query_button_without_keys_shows_error(app_db, monkeypatch):
+    monkeypatch.delenv("KIWOOM_APPKEY", raising=False)
+    monkeypatch.delenv("KIWOOM_SECRETKEY", raising=False)
+    at = _logged_in()
+    _button(at, "조회").click()
+    at.run()
+    assert not at.exception
+    assert any("KIWOOM" in e.value for e in at.error)
+
+
+def test_query_fills_current_price_keeps_actual(app_db, monkeypatch):
+    class FakeKiwoom:
+        def latest_price(self, code):
+            return 12_345
+
+    monkeypatch.setattr("engine.data.KiwoomQuote", lambda: FakeKiwoom())
     codes = _codes(app_db)
     conn = db.connect(app_db)
     db.save_entry(conn, "tester", RUN_DATE, codes[0], 100_000.0, None)
     conn.close()
     at = _logged_in()
-    _button(at, "현재가 자동 채우기").click()
+    _button(at, "조회").click()
     at.run()
     assert not at.exception
     conn = db.connect(app_db)
     entries = db.get_entries(conn, "tester", RUN_DATE)
     conn.close()
     assert set(entries) == set(codes)
-    assert all(e["current_price"] and e["current_price"] > 0 for e in entries.values())
+    assert all(e["current_price"] == 12_345 for e in entries.values())
     assert entries[codes[0]]["actual_price"] == 100_000.0
     assert _table(at).loc[0, "수익률(%)"] is not None  # 실구매가가 있는 행은 수익률 계산됨
 
@@ -171,3 +186,136 @@ def test_normal_user_role_is_user(app_db):
     at = _logged_in()
     assert at.session_state["role"] == "user"
     assert not any("관리자" in m.value for m in at.sidebar.markdown)
+
+
+# ───────── 메뉴 / 역할 ─────────
+def _admin(app_db):
+    conn = db.connect(app_db)
+    db.create_user(conn, "boss", "boss-pass-123", "admin")
+    conn.close()
+    return _logged_in("boss", "boss-pass-123")
+
+
+def test_user_sees_only_overview_menu(app_db):
+    at = _logged_in()
+    assert list(at.sidebar.radio[0].options) == ["Overview"]
+
+
+def test_admin_sees_all_menus_and_overview_default(app_db):
+    at = _admin(app_db)
+    assert list(at.sidebar.radio[0].options) == ["Overview", "Analysis", "Object"]
+    assert list(_table(at).columns) == EXPECTED_COLS
+
+
+def test_analysis_lookup(app_db):
+    at = _admin(app_db)
+    at.sidebar.radio[0].set_value("Analysis").run()
+    assert not at.exception
+    at.text_input[0].set_value("삼성전자").run()
+    assert not at.exception
+    assert any("삼성전자" in s.value for s in at.subheader)
+    assert any("샘플" in e.value for e in at.error)  # 가짜 시세 경고 유지
+    at.text_input[0].set_value("없는종목xyz").run()
+    assert at.warning
+
+
+def test_object_add_and_delete_recommendation(app_db):
+    at = _admin(app_db)
+    at.sidebar.radio[0].set_value("Object").run()
+    assert not at.exception
+    assert "실구매가" not in list(at.dataframe[0].value.columns)
+    f = {t.label: t for t in at.text_input}
+    f["종목코드 (6자리)"].set_value("999999")
+    f["종목명"].set_value("테스트종목")
+    n = {x.label: x for x in at.number_input}
+    n["전일종가"].set_value(50_000)
+    n["매수가"].set_value(49_550)
+    n["매도가(목표가)"].set_value(51_800)
+    n["손절가"].set_value(48_050)
+    _button(at, "저장").click()
+    at.run()
+    assert not at.exception and not at.error
+    assert "999999" in _codes(app_db)
+
+
+def test_object_rejects_invalid_prices(app_db):
+    at = _admin(app_db)
+    at.sidebar.radio[0].set_value("Object").run()
+    {t.label: t for t in at.text_input}["종목코드 (6자리)"].set_value("999999")
+    {t.label: t for t in at.text_input}["종목명"].set_value("잘못")
+    n = {x.label: x for x in at.number_input}
+    n["전일종가"].set_value(50_000)
+    n["매수가"].set_value(51_000)  # 매수가 > 목표가
+    n["매도가(목표가)"].set_value(50_500)
+    n["손절가"].set_value(48_050)
+    _button(at, "저장").click()
+    at.run()
+    assert at.error
+    assert "999999" not in _codes(app_db)
+
+
+# ───────── 삭제 시 보유 종목 유지 / 비고 ─────────
+def test_admin_delete_keeps_held_stock_for_that_user_only(app_db):
+    codes = _codes(app_db)
+    conn = db.connect(app_db)
+    db.create_user(conn, "other", "other-pass-123")
+    db.save_entry(conn, "tester", RUN_DATE, codes[0], 100_000.0, None)   # 실구매가 있음 → 유지
+    db.save_entry(conn, "other", RUN_DATE, codes[0], None, 5_000.0)      # 현재가만 → 사라짐
+    assert db.delete_recommendation(conn, RUN_DATE, codes[0]) is False
+    conn.close()
+    df = _table(_logged_in())
+    assert len(df) == 5
+    assert df["구분"].str.startswith("🟠").sum() == 1
+    assert len(_table(_logged_in("other", "other-pass-123"))) == 4
+
+
+def test_delete_without_holders_removes_row(app_db):
+    codes = _codes(app_db)
+    conn = db.connect(app_db)
+    assert db.delete_recommendation(conn, RUN_DATE, codes[0]) is True
+    assert len(db.get_recommendations(conn, RUN_DATE, include_removed=True)) == 4
+    conn.close()
+
+
+def test_removed_stock_hidden_from_object_page(app_db):
+    codes = _codes(app_db)
+    conn = db.connect(app_db)
+    db.save_entry(conn, "tester", RUN_DATE, codes[0], 100_000.0, None)
+    db.delete_recommendation(conn, RUN_DATE, codes[0])
+    db.create_user(conn, "boss", "boss-pass-123", "admin")
+    conn.close()
+    at = _logged_in("boss", "boss-pass-123")
+    at.sidebar.radio[0].set_value("Object").run()
+    assert len(at.dataframe[0].value) == 4
+
+
+def test_note_is_saved_per_user(app_db):
+    codes = _codes(app_db)
+    conn = db.connect(app_db)
+    db.save_entry(conn, "tester", RUN_DATE, codes[0], None, None, "  메모  ")
+    db.create_user(conn, "other", "other-pass-123")
+    entries = db.get_entries(conn, "tester", RUN_DATE)
+    assert entries[codes[0]]["note"] == "메모"  # 비고만 있어도 행 유지
+    assert db.get_entries(conn, "other", RUN_DATE) == {}
+    conn.close()
+    df = _table(_logged_in())
+    assert df.loc[0, "비고"] == "메모" and df["수익률(%)"].isna().all()
+
+
+def test_save_hint_and_confirmation_message(app_db):
+    at = _logged_in()
+    assert any("[저장]" in i.value for i in at.info)  # 저장 버튼을 눌러야 저장된다는 안내
+    _button(at, "저장").click()
+    at.run()
+    assert not at.exception
+    assert any("저장되었습니다" in s.value for s in at.success)
+
+
+def test_object_delete_default_is_blank_and_button_disabled(app_db):
+    at = _admin(app_db)
+    at.sidebar.radio[0].set_value("Object").run()
+    sb = next(s for s in at.selectbox if s.label == "삭제할 종목")
+    assert sb.value is None
+    assert _button(at, "삭제").disabled
+    sb.select_index(0).run()
+    assert not _button(at, "삭제").disabled

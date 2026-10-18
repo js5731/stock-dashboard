@@ -42,6 +42,7 @@ _SCHEMA_STMTS = [
         reason TEXT,
         PRIMARY KEY (run_date, code)
     )""",
+    "ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS removed INTEGER NOT NULL DEFAULT 0",
     """CREATE TABLE IF NOT EXISTS user_entries (
         username TEXT NOT NULL,
         run_date TEXT NOT NULL,
@@ -51,6 +52,7 @@ _SCHEMA_STMTS = [
         updated_at TEXT,
         PRIMARY KEY (username, run_date, code)
     )""",
+    "ALTER TABLE user_entries ADD COLUMN IF NOT EXISTS note TEXT",
 ]
 
 
@@ -110,7 +112,7 @@ def user_count(conn) -> int:
 def save_run(conn, run_date: str, regime: dict, data_source: str, recs: list[dict]) -> None:
     import json
     with conn.cursor() as cur:
-        cur.execute("DELETE FROM recommendations WHERE run_date = %s", (run_date,))
+        cur.execute("DELETE FROM recommendations WHERE run_date = %s AND removed = 0", (run_date,))
         cur.execute(
             """INSERT INTO runs(run_date, regime, regime_detail, data_source, created_at)
                VALUES (%s, %s, %s, %s, %s)
@@ -128,7 +130,13 @@ def save_run(conn, run_date: str, regime: dict, data_source: str, recs: list[dic
                 """INSERT INTO recommendations
                    (run_date, code, name, sector, opinion, score, news_score,
                     buy_price, sell_price, stop_price, prev_close, reason)
-                   VALUES %s""",
+                   VALUES %s
+                   ON CONFLICT (run_date, code) DO UPDATE SET
+                     name = EXCLUDED.name, sector = EXCLUDED.sector, opinion = EXCLUDED.opinion,
+                     score = EXCLUDED.score, news_score = EXCLUDED.news_score,
+                     buy_price = EXCLUDED.buy_price, sell_price = EXCLUDED.sell_price,
+                     stop_price = EXCLUDED.stop_price, prev_close = EXCLUDED.prev_close,
+                     reason = EXCLUDED.reason, removed = 0""",
                 [(r["run_date"], r["code"], r["name"], r["sector"], r["opinion"],
                   r["score"], r["news_score"], r["buy_price"], r["sell_price"],
                   r["stop_price"], r["prev_close"], r["reason"]) for r in recs],
@@ -148,10 +156,24 @@ def get_run(conn, run_date: str):
         return cur.fetchone()
 
 
-def get_recommendations(conn, run_date: str) -> list:
+def get_recommendations(conn, run_date: str, include_removed: bool = False) -> list:
+    where = "" if include_removed else " AND removed = 0"
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT * FROM recommendations WHERE run_date = %s ORDER BY score DESC", (run_date,)
+            f"SELECT * FROM recommendations WHERE run_date = %s{where} ORDER BY score DESC", (run_date,)
+        )
+        return cur.fetchall()
+
+
+def get_user_recommendations(conn, username: str, run_date: str) -> list:
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT r.* FROM recommendations r
+               WHERE r.run_date = %s AND (r.removed = 0 OR EXISTS (
+                   SELECT 1 FROM user_entries e WHERE e.username = %s AND e.run_date = r.run_date
+                   AND e.code = r.code AND e.actual_price IS NOT NULL))
+               ORDER BY r.score DESC""",
+            (run_date, username),
         )
         return cur.fetchall()
 
@@ -164,22 +186,63 @@ def get_entries(conn, username: str, run_date: str) -> dict:
         return {r["code"]: r for r in cur.fetchall()}
 
 
-def save_entry(conn, username: str, run_date: str, code: str, actual, current) -> None:
+def save_entry(conn, username: str, run_date: str, code: str, actual, current, note: str | None = None) -> None:
+    note = (note or "").strip() or None
     with conn.cursor() as cur:
-        if actual is None and current is None:
+        if actual is None and current is None and note is None:
             cur.execute(
                 "DELETE FROM user_entries WHERE username = %s AND run_date = %s AND code = %s",
                 (username, run_date, code),
             )
         else:
             cur.execute(
-                """INSERT INTO user_entries(username, run_date, code, actual_price, current_price, updated_at)
-                   VALUES (%s, %s, %s, %s, %s, %s)
+                """INSERT INTO user_entries(username, run_date, code, actual_price, current_price, note, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (username, run_date, code) DO UPDATE SET
                      actual_price = EXCLUDED.actual_price,
                      current_price = EXCLUDED.current_price,
+                     note = EXCLUDED.note,
                      updated_at = EXCLUDED.updated_at""",
-                (username, run_date, code, actual, current,
+                (username, run_date, code, actual, current, note,
                  datetime.now().isoformat(timespec="seconds")),
             )
     conn.commit()
+
+
+_REC_COLS = ("code", "name", "sector", "opinion", "score", "news_score",
+             "buy_price", "sell_price", "stop_price", "prev_close", "reason")
+
+
+def upsert_recommendation(conn, run_date: str, rec: dict) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""INSERT INTO recommendations(run_date, {', '.join(_REC_COLS)})
+                VALUES (%s{', %s' * len(_REC_COLS)})
+                ON CONFLICT (run_date, code) DO UPDATE SET
+                {', '.join(f'{c} = EXCLUDED.{c}' for c in _REC_COLS if c != 'code')}, removed = 0""",
+            (run_date, *(rec.get(c) for c in _REC_COLS)),
+        )
+    conn.commit()
+
+
+def delete_recommendation(conn, run_date: str, code: str) -> bool:
+    """db.delete_recommendation 과 동일 규칙. 완전 삭제면 True."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS cnt FROM user_entries WHERE run_date = %s AND code = %s AND actual_price IS NOT NULL",
+            (run_date, code),
+        )
+        held = cur.fetchone()["cnt"]
+        cur.execute("DELETE FROM user_entries WHERE run_date = %s AND code = %s AND actual_price IS NULL", (run_date, code))
+        if held:
+            cur.execute("UPDATE recommendations SET removed = 1 WHERE run_date = %s AND code = %s", (run_date, code))
+        else:
+            cur.execute("DELETE FROM recommendations WHERE run_date = %s AND code = %s", (run_date, code))
+    conn.commit()
+    return not held
+
+
+def code_history(conn, code: str) -> list:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM recommendations WHERE code = %s AND removed = 0 ORDER BY run_date DESC", (code,))
+        return cur.fetchall()

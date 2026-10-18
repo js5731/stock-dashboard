@@ -126,7 +126,68 @@ class FdrProvider:
             return None
 
 
+class KiwoomQuote:
+    """키움 REST API 현재가 조회 전용 (ka10001 주식기본정보요청). 시세 이력은 제공하지 않는다.
+    환경변수: KIWOOM_APPKEY, KIWOOM_SECRETKEY, KIWOOM_BASE_URL(기본 실서버, 모의투자는 https://mockapi.kiwoom.com)
+    ※ 문서 기준으로 작성했으며 실제 키로 호출 검증은 하지 못했다. 조회만 하며 주문 기능은 없다."""
+
+    name = "kiwoom"
+    is_real = True
+    DEFAULT_URL = "https://api.kiwoom.com"
+
+    def __init__(self, appkey: str | None = None, secretkey: str | None = None, base_url: str | None = None):
+        import os
+
+        self.appkey = appkey or os.environ.get("KIWOOM_APPKEY", "")
+        self.secretkey = secretkey or os.environ.get("KIWOOM_SECRETKEY", "")
+        self.base_url = (base_url or os.environ.get("KIWOOM_BASE_URL") or self.DEFAULT_URL).rstrip("/")
+        if not self.appkey or not self.secretkey:
+            raise RuntimeError("KIWOOM_APPKEY / KIWOOM_SECRETKEY 환경변수가 설정되지 않았습니다.")
+        self._token: str | None = None
+
+    def _post(self, path: str, body: dict, headers: dict | None = None) -> dict:
+        import json
+        import urllib.request
+
+        req = urllib.request.Request(
+            self.base_url + path,
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json;charset=UTF-8", **(headers or {})},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+
+    def _get_token(self) -> str:
+        if not self._token:
+            res = self._post(
+                "/oauth2/token",
+                {"grant_type": "client_credentials", "appkey": self.appkey, "secretkey": self.secretkey},
+            )
+            if not res.get("token"):
+                raise RuntimeError(f"키움 토큰 발급 실패: {res.get('return_msg', res)}")
+            self._token = res["token"]
+        return self._token
+
+    def latest_price(self, code: str) -> Optional[int]:
+        """현재가(원). 조회 실패 시 None. 응답의 부호(+/-)는 전일대비 방향이므로 제거한다."""
+        try:
+            res = self._post(
+                "/api/dostk/stkinfo",
+                {"stk_cd": code},
+                {"authorization": f"Bearer {self._get_token()}", "api-id": "ka10001"},
+            )
+            if res.get("return_code", 0) != 0:
+                return None
+            price = abs(int(str(res["cur_prc"]).replace(",", "")))
+            return price or None
+        except Exception:
+            return None
+
+
 def get_provider(name: str = "sample", **kwargs):
+    if name == "kiwoom":
+        return KiwoomQuote(**kwargs)
     if name == "fdr":
         return FdrProvider()
     return SampleProvider(**kwargs)

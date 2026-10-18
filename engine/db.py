@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS recommendations (
     stop_price INTEGER,
     prev_close INTEGER,
     reason TEXT,
+    removed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (run_date, code)
 );
 CREATE TABLE IF NOT EXISTS user_entries (
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS user_entries (
     code TEXT NOT NULL,
     actual_price REAL,
     current_price REAL,
+    note TEXT,
     updated_at TEXT,
     PRIMARY KEY (username, run_date, code)
 );
@@ -60,6 +62,13 @@ def connect(path: str | os.PathLike) -> sqlite3.Connection:
     if "role" not in {r["name"] for r in conn.execute("PRAGMA table_info(users)")}:  # 기존 DB 이전
         conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
         conn.commit()
+    for table, col, ddl in (
+        ("recommendations", "removed", "INTEGER NOT NULL DEFAULT 0"),
+        ("user_entries", "note", "TEXT"),
+    ):  # 기존 DB 이전
+        if col not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+            conn.commit()
     return conn
 
 
@@ -104,13 +113,13 @@ def user_count(conn: sqlite3.Connection) -> int:
 def save_run(conn: sqlite3.Connection, run_date: str, regime: dict, data_source: str, recs: list[dict]) -> None:
     import json
 
-    conn.execute("DELETE FROM recommendations WHERE run_date=?", (run_date,))
+    conn.execute("DELETE FROM recommendations WHERE run_date=? AND removed=0", (run_date,))
     conn.execute(
         "INSERT OR REPLACE INTO runs(run_date, regime, regime_detail, data_source, created_at) VALUES (?,?,?,?,?)",
         (run_date, regime["mode"], json.dumps(regime, ensure_ascii=False), data_source, datetime.now().isoformat(timespec="seconds")),
     )
     conn.executemany(
-        """INSERT INTO recommendations
+        """INSERT OR REPLACE INTO recommendations
            (run_date, code, name, sector, opinion, score, news_score, buy_price, sell_price, stop_price, prev_close, reason)
            VALUES (:run_date, :code, :name, :sector, :opinion, :score, :news_score, :buy_price, :sell_price, :stop_price, :prev_close, :reason)""",
         recs,
@@ -126,9 +135,23 @@ def get_run(conn: sqlite3.Connection, run_date: str):
     return conn.execute("SELECT * FROM runs WHERE run_date=?", (run_date,)).fetchone()
 
 
-def get_recommendations(conn: sqlite3.Connection, run_date: str) -> list[sqlite3.Row]:
+def get_recommendations(conn: sqlite3.Connection, run_date: str, include_removed: bool = False) -> list[sqlite3.Row]:
+    """include_removed=False(관리자 화면): 삭제 처리된 종목 제외. True: 전체."""
+    where = "" if include_removed else " AND removed=0"
     return conn.execute(
-        "SELECT * FROM recommendations WHERE run_date=? ORDER BY score DESC", (run_date,)
+        f"SELECT * FROM recommendations WHERE run_date=?{where} ORDER BY score DESC", (run_date,)
+    ).fetchall()
+
+
+def get_user_recommendations(conn: sqlite3.Connection, username: str, run_date: str) -> list[sqlite3.Row]:
+    """사용자 화면: 관리자가 삭제했어도 해당 사용자가 실구매가를 입력한 종목은 계속 보인다."""
+    return conn.execute(
+        """SELECT r.* FROM recommendations r
+           WHERE r.run_date=? AND (r.removed=0 OR EXISTS (
+               SELECT 1 FROM user_entries e WHERE e.username=? AND e.run_date=r.run_date
+               AND e.code=r.code AND e.actual_price IS NOT NULL))
+           ORDER BY r.score DESC""",
+        (run_date, username, ),
     ).fetchall()
 
 
@@ -139,17 +162,55 @@ def get_entries(conn: sqlite3.Connection, username: str, run_date: str) -> dict[
     return {r["code"]: r for r in rows}
 
 
-def save_entry(conn: sqlite3.Connection, username: str, run_date: str, code: str, actual, current) -> None:
-    """둘 다 비어 있으면 행을 삭제한다."""
-    if actual is None and current is None:
+def save_entry(conn: sqlite3.Connection, username: str, run_date: str, code: str, actual, current, note: str | None = None) -> None:
+    """실구매가·현재가·비고가 모두 비어 있으면 행을 삭제한다."""
+    note = (note or "").strip() or None
+    if actual is None and current is None and note is None:
         conn.execute(
             "DELETE FROM user_entries WHERE username=? AND run_date=? AND code=?",
             (username, run_date, code),
         )
     else:
         conn.execute(
-            """INSERT OR REPLACE INTO user_entries(username, run_date, code, actual_price, current_price, updated_at)
-               VALUES (?,?,?,?,?,?)""",
-            (username, run_date, code, actual, current, datetime.now().isoformat(timespec="seconds")),
+            """INSERT OR REPLACE INTO user_entries(username, run_date, code, actual_price, current_price, note, updated_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (username, run_date, code, actual, current, note, datetime.now().isoformat(timespec="seconds")),
         )
     conn.commit()
+
+
+_REC_COLS = ("code", "name", "sector", "opinion", "score", "news_score",
+             "buy_price", "sell_price", "stop_price", "prev_close", "reason")
+
+
+def upsert_recommendation(conn: sqlite3.Connection, run_date: str, rec: dict) -> None:
+    """수동 추가/수정. 같은 (run_date, code)가 있으면 덮어쓴다."""
+    conn.execute(
+        f"INSERT OR REPLACE INTO recommendations(run_date, {', '.join(_REC_COLS)}, removed) "
+        f"VALUES (?{',?' * len(_REC_COLS)}, 0)",
+        (run_date, *(rec.get(c) for c in _REC_COLS)),
+    )
+    conn.commit()
+
+
+def delete_recommendation(conn: sqlite3.Connection, run_date: str, code: str) -> bool:
+    """관리자 삭제. 실구매가를 입력한 사용자가 있으면 행을 남기고 removed=1로만 표시하고(그 사용자 화면에는 계속 보임),
+    그렇지 않으면 완전히 삭제한다. 실구매가가 없는 사용자의 입력은 정리한다. 완전 삭제면 True."""
+    held = conn.execute(
+        "SELECT COUNT(*) FROM user_entries WHERE run_date=? AND code=? AND actual_price IS NOT NULL",
+        (run_date, code),
+    ).fetchone()[0]
+    conn.execute("DELETE FROM user_entries WHERE run_date=? AND code=? AND actual_price IS NULL", (run_date, code))
+    if held:
+        conn.execute("UPDATE recommendations SET removed=1 WHERE run_date=? AND code=?", (run_date, code))
+    else:
+        conn.execute("DELETE FROM recommendations WHERE run_date=? AND code=?", (run_date, code))
+    conn.commit()
+    return not held
+
+
+def code_history(conn: sqlite3.Connection, code: str) -> list[sqlite3.Row]:
+    """한 종목의 날짜별 추천 이력(최신순)."""
+    return conn.execute(
+        "SELECT * FROM recommendations WHERE code=? AND removed=0 ORDER BY run_date DESC", (code,)
+    ).fetchall()
