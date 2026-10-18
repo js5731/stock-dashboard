@@ -88,6 +88,30 @@ def build_table(recs, entries) -> pd.DataFrame:
     return df
 
 
+def _open_analysis() -> None:
+    """바로가기 표에서 종목 셀을 클릭하면 Analysis 메뉴로 이동한다 (콜백이라 위젯 생성 전에 상태를 바꿀 수 있다)."""
+    sel = st.session_state.get("stock_shortcuts")
+    cells = sel.selection.cells if sel else []
+    if cells:
+        row_idx = cells[0][0]
+        st.session_state["menu"] = "Analysis"
+        st.session_state["analysis_query"] = st.session_state["shortcut_codes"][row_idx]
+
+
+def _render_stock_shortcuts(recs) -> None:
+    """data_editor는 셀 클릭 이벤트를 주지 않아서, 종목 칸만 따로 클릭 가능한 표로 제공한다."""
+    st.session_state["shortcut_codes"] = [r["code"] for r in recs]
+    st.caption("🔎 종목 셀을 클릭하면 Analysis 화면으로 이동합니다.")
+    st.dataframe(
+        pd.DataFrame({"종목": [f"{r['name']} ({r['code']})" for r in recs]}),
+        key="stock_shortcuts",
+        on_select=_open_analysis,
+        selection_mode="single-cell",
+        hide_index=True,
+        width="stretch",
+    )
+
+
 def render_overview(conn) -> None:
     user = st.session_state["user"]
     st.title("*Today Reprot")
@@ -163,6 +187,9 @@ def render_overview(conn) -> None:
     if msg := st.session_state.pop("query_warn", None):
         st.warning(msg)
 
+    if "Analysis" in allowed_menus(st.session_state.get("role", "user")):
+        _render_stock_shortcuts(recs)
+
     st.caption("본 화면은 판단 보조 도구이며 수익을 보장하지 않습니다. 투자 판단과 책임은 본인에게 있습니다.")
 
 
@@ -208,7 +235,7 @@ def _resolve_stock(conn, query: str):
 
 def render_analysis(conn) -> None:
     st.title("🔍 Analysis")
-    query = st.text_input("종목명 또는 종목코드", placeholder="예: 삼성전자 또는 005930")
+    query = st.text_input("종목명 또는 종목코드", key="analysis_query", placeholder="예: 삼성전자 또는 005930")
     if not query.strip():
         st.info("종목을 입력하면 기업 개요·주가·추천 이력을 보여줍니다.")
         return
@@ -250,6 +277,12 @@ def render_analysis(conn) -> None:
             )
 
 
+def _obj_reset() -> None:
+    """폼/확인창을 닫고 표의 행 선택을 초기화한다 (표 key를 바꾸면 선택 상태가 새로 시작된다)."""
+    st.session_state["obj_mode"] = None
+    st.session_state["obj_gen"] = st.session_state.get("obj_gen", 0) + 1
+
+
 def render_object(conn) -> None:
     st.title("🗂 Object")
     st.caption("Overview에 표시되는 추천 종목을 관리합니다. 실구매가·현재가·수익률은 사용자별 입력이라 여기서 다루지 않습니다.")
@@ -261,51 +294,111 @@ def render_object(conn) -> None:
     recs = db.get_recommendations(conn, run_date)
 
     cols = ["code", "name", "sector", "opinion", "score", "news_score", "buy_price", "sell_price", "stop_price", "prev_close", "reason"]
-    st.dataframe(pd.DataFrame([{c: r[c] for c in cols} for r in recs], columns=cols), hide_index=True, width="stretch")
+    st.caption("수정·삭제할 종목은 표에서 행을 선택하세요.")
+    sel = st.dataframe(
+        pd.DataFrame([{c: r[c] for c in cols} for r in recs], columns=cols),
+        key=f"obj_table_{st.session_state.get('obj_gen', 0)}_{run_date}",
+        on_select="rerun", selection_mode="single-row", hide_index=True, width="stretch",
+    )
+    rows = sel.selection.rows
+    target = recs[rows[0]] if rows else None
 
-    st.subheader("종목 추가 / 수정")
-    st.caption("이미 있는 종목코드를 입력하면 해당 종목을 수정합니다. 매수가·손절가는 매도/회피 의견이면 0(공란)으로 두세요.")
-    with st.form("obj_form", clear_on_submit=False):
-        a, b, c = st.columns(3)
-        code = a.text_input("종목코드 (6자리)")
-        name = b.text_input("종목명")
-        sector = c.text_input("섹터")
-        opinion = a.selectbox("의견", manage.OPINIONS)
-        score = b.number_input("종합 점수", value=0.0, step=0.1)
-        news_score = c.number_input("뉴스 점수", value=0.0, step=0.1)
-        prev_close = a.number_input("전일종가", min_value=0, step=1)
-        buy = b.number_input("매수가", min_value=0, step=1)
-        sell = c.number_input("매도가(목표가)", min_value=0, step=1)
-        stop = a.number_input("손절가", min_value=0, step=1)
-        reason = st.text_input("선정 사유")
-        submitted = st.form_submit_button("저장", type="primary")
-    if submitted:
-        rec = {
-            "code": code.strip(), "name": name.strip(), "sector": sector.strip(), "opinion": opinion,
-            "score": score, "news_score": news_score, "prev_close": int(prev_close) or None,
-            "buy_price": int(buy) or None, "sell_price": int(sell) or None, "stop_price": int(stop) or None,
-            "reason": reason.strip(),
-        }
-        errors = manage.validate_recommendation(rec)
-        if errors:
-            for e in errors:
-                st.error(e)
-        else:
-            db.upsert_recommendation(conn, run_date, rec)
-            st.success(f"{rec['name']} ({rec['code']}) 저장 완료")
-            st.rerun()
+    b_add, b_edit, b_del, _ = st.columns([1, 1, 1, 5])
+    if b_add.button("종목 추가"):
+        st.session_state["obj_mode"] = "add"
+    if b_edit.button("수정", disabled=target is None):
+        st.session_state["obj_mode"] = "edit"
+    if b_del.button("삭제", disabled=target is None):
+        st.session_state["obj_mode"] = "delete"
+    mode = st.session_state.get("obj_mode")
+    if mode in ("edit", "delete") and target is None:  # 선택이 해제되면 닫는다
+        mode = st.session_state["obj_mode"] = None
 
-    if recs:
-        st.subheader("종목 삭제")
-        target = st.selectbox(
-            "삭제할 종목", [f"{r['name']} ({r['code']})" for r in recs], index=None, placeholder="종목을 선택하세요", key="obj_del"
+    if mode == "delete":
+        st.warning(
+            f"**{target['name']} ({target['code']})** 종목을 삭제하시겠습니까?\n\n"
+            "실구매가를 입력한 사용자에게는 계속 보이고(관리자 삭제 표시), 그 외 사용자에게서는 사라집니다."
         )
-        if st.button("삭제", disabled=target is None, help="실구매가를 입력한 사용자에게는 계속 보이고(관리자 삭제 표시), 그 외 사용자에게서는 사라집니다."):
-            gone = db.delete_recommendation(conn, run_date, target.rsplit("(", 1)[1].rstrip(")"))
+        c_ok, c_no, _ = st.columns([1, 1, 6])
+        if c_ok.button("삭제 확인", type="primary"):
+            gone = db.delete_recommendation(conn, run_date, target["code"])
             st.session_state["obj_msg"] = "삭제 완료" if gone else "삭제 처리했습니다. 실구매가를 입력한 사용자 화면에는 계속 표시됩니다."
+            _obj_reset()
             st.rerun()
+        if c_no.button("취소"):
+            _obj_reset()
+            st.rerun()
+    elif mode in ("add", "edit"):
+        _render_object_form(conn, run_date, recs, target if mode == "edit" else None)
+
     if msg := st.session_state.pop("obj_msg", None):
         st.info(msg)
+
+
+def _render_object_form(conn, run_date: str, recs, current) -> None:
+    """추가/수정 공용 폼. current가 있으면 수정(현재 값으로 채우고 종목코드는 고정)."""
+    editing = current is not None
+    code = current["code"] if editing else ""
+    vals: dict = dict(current) if editing else {}
+    st.subheader("종목 수정" if editing else "종목 추가")
+    if not editing:
+        # 폼 안의 위젯은 제출 전에는 재실행을 일으키지 않으므로 종목코드만 폼 밖에 둔다 (입력 후 Enter → 자동 채움)
+        code = st.text_input("종목코드 (6자리)", key=f"obj_add_code_{st.session_state.get('obj_gen', 0)}", help="입력 후 Enter를 누르면 나머지 칸이 자동으로 채워집니다.").strip()
+        if len(code) == 6:
+            if any(r["code"] == code for r in recs):
+                st.warning("이미 등록된 종목코드입니다. 표에서 선택해 수정하세요.")
+            try:
+                quote = get_provider("kiwoom")  # 키가 있으면 API로 종목명·섹터 조회
+            except RuntimeError:
+                quote = None
+            vals = manage.suggest_from_code(code, get_provider(PROVIDER), load_universe(), quote)
+            if not vals:
+                st.info("종목 정보를 찾지 못했습니다. 직접 입력해 주세요.")
+            elif vals.get("prev_source") == "현재가":
+                st.warning("전일종가를 조회하지 못해 현재가를 전일종가 칸에 넣었습니다. 확인 후 수정하세요.")
+            elif not get_provider(PROVIDER).is_real:
+                st.error("⚠️ 샘플(가짜) 시세로 채운 값입니다. 실제 가격이 아니니 반드시 확인·수정하세요.")
+            else:
+                st.caption("시세로 계산한 제안값입니다. 저장 전에 확인·수정하세요.")
+        st.caption("매수가·손절가는 매도/회피 의견이면 0(공란)으로 두세요.")
+    g = lambda k, d=None: vals[k] if vals.get(k) is not None else d  # noqa: E731
+    with st.form(f"obj_form_{'edit_' + code if editing else 'add_' + code}"):
+        a, b, c = st.columns(3)
+        if editing:
+            a.text_input("종목코드 (6자리)", value=code, disabled=True)
+        name = b.text_input("종목명", value=g("name", ""))
+        sector = c.text_input("섹터", value=g("sector", ""))
+        opinion = a.selectbox("의견", manage.OPINIONS, index=manage.OPINIONS.index(g("opinion", manage.OPINIONS[0])))
+        score = b.number_input("종합 점수", value=float(g("score", 0.0)), step=0.1)
+        news_score = c.number_input("뉴스 점수", value=float(g("news_score", 0.0)), step=0.1)
+        prev_close = a.number_input("전일종가", min_value=0, step=1, value=int(g("prev_close", 0)))
+        buy = b.number_input("매수가", min_value=0, step=1, value=int(g("buy_price", 0)))
+        sell = c.number_input("매도가(목표가)", min_value=0, step=1, value=int(g("sell_price", 0)))
+        stop = a.number_input("손절가", min_value=0, step=1, value=int(g("stop_price", 0)))
+        reason = st.text_input("선정 사유", value=g("reason", ""))
+        submitted = st.form_submit_button("저장", type="primary")
+    if st.button("취소", key="obj_form_cancel"):
+        _obj_reset()
+        st.rerun()
+    if not submitted:
+        return
+    rec = {
+        "code": current["code"] if editing else code.strip(), "name": name.strip(), "sector": sector.strip(),
+        "opinion": opinion, "score": score, "news_score": news_score, "prev_close": int(prev_close) or None,
+        "buy_price": int(buy) or None, "sell_price": int(sell) or None, "stop_price": int(stop) or None,
+        "reason": reason.strip(),
+    }
+    errors = manage.validate_recommendation(rec)
+    if not editing and any(r["code"] == rec["code"] for r in recs):
+        errors.append("이미 등록된 종목코드입니다. 표에서 선택해 수정하세요.")
+    if errors:
+        for e in errors:
+            st.error(e)
+        return
+    db.upsert_recommendation(conn, run_date, rec)
+    st.session_state["obj_msg"] = f"{rec['name']} ({rec['code']}) {'수정' if editing else '추가'} 완료"
+    _obj_reset()
+    st.rerun()
 
 
 def main() -> None:

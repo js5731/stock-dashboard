@@ -5,7 +5,7 @@
 화면 1: 로그인 / 화면 2: 사이드바 Menu(Overview·Analysis·Object) + 우측 상세. 역할 `admin`은 전 메뉴, `user`는 Overview만.
 - Overview: 추천 표(구분, 의견, 매수가, 매도가, 손절가, 실구매가, 현재가, 수익률, 선정 사유, 비고)
 - Analysis(admin): 종목 입력 → 기업 현황·주가 차트·추천 이력 (wisereport 재무 항목은 미연동)
-- Object(admin): Overview에 표시되는 추천 종목 추가·수정·삭제 (실구매가·현재가·수익률은 다루지 않음)
+- Object(admin): 표에서 행 선택 → [종목 추가]/[수정]/[삭제] 버튼 (추가·수정은 같은 폼, 추가 시 종목코드 입력+Enter로 종목명·섹터(키움 API 우선, 실패 시 universe.csv)·전일종가(키움 기준가→현재가→시세 제공자 순)·매수/매도/손절 제안값 자동 채움, 수정은 현재 값으로 채움, 삭제는 확인 후 실행. 실구매가·현재가·수익률은 다루지 않음)
 목표는 **무료 운영**. 매일 아침 배치가 미리 계산해 DB에 저장하고, 화면은 읽기만 한다. 배치 주기는 관리자가 정할 수 있고, 수동 요청 가능 
 현재 단계: 프로토타입(샘플 시세). 실제 돈을 넣기 전에 백테스트와 모의 운영 검증이 선행되어야 한다.
 
@@ -16,7 +16,7 @@ python -m jobs.daily_job --demo                    # 샘플 추천 + 데모 계�
 python -m jobs.daily_job --news-file news.txt      # 직접 붙여넣은 헤드라인으로 실행
 python -m jobs.create_user <ID>                    # 계정 생성 (비밀번호는 프롬프트)
 streamlit run app.py                               # http://localhost:8501
-python -m pytest -q                                # 전체 테스트 (70개)
+python -m pytest -q                                # 전체 테스트 (88개)
 ```
 
 ## 구조
@@ -53,7 +53,7 @@ python -m pytest -q                                # 전체 테스트 (70개)
 
 ## 알려진 한계 / 다음 작업
 - 시세는 기본이 가짜(난수) 데이터. `FdrProvider`는 구현만 되어 있고 실행 검증을 못 했다.
-- 키움 REST 현재가 조회(`KiwoomQuote`)는 문서 기준 구현이며 실제 키 호출은 검증하지 못했다. 토스증권 오픈API 연동 없음 (문서의 호출 한도·약관 확인 후 추가).
+- 키움 REST 현재가·종목정보 조회(`KiwoomQuote`; 종목정보 ka10100의 응답 필드 `name`·`upName`은 문서로 확인하지 못한 추정)는 문서 기준 구현이며 실제 키 호출은 검증하지 못했다. 토스증권 오픈API 연동 없음 (문서의 호출 한도·약관 확인 후 추가).
 - Analysis는 시세·추천 이력만 보여준다. wisereport 같은 재무제표·컨센서스는 데이터 출처·약관 확인 전이라 미연동.
 - `engine/` 수정 후 Streamlit 서버가 이전 모듈을 캐시해 `AttributeError`가 날 수 있다 → 서버 재시작.
 - `tests/test_app.py::test_query_button_without_keys_shows_error`는 `.env`에 키움 키가 있으면 실패한다 (`load_dotenv`가 테스트의 `delenv`를 덮어씀). 미수정.

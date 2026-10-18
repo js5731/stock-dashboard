@@ -184,6 +184,42 @@ class KiwoomQuote:
         except Exception:
             return None
 
+    def prev_close(self, code: str) -> Optional[int]:
+        """전일종가(원). ka10001 응답의 기준가(base_pric)를 쓴다. 조회 실패 시 None.
+        ※ base_pric 가 전일종가라는 것은 문서 기억에 의존한 추정이며 실제 호출 검증은 못 했다."""
+        try:
+            res = self._post(
+                "/api/dostk/stkinfo",
+                {"stk_cd": code},
+                {"authorization": f"Bearer {self._get_token()}", "api-id": "ka10001"},
+            )
+            if res.get("return_code", 0) != 0:
+                return None
+            return abs(int(str(res["base_pric"]).replace(",", ""))) or None
+        except Exception:
+            return None
+
+    def stock_info(self, code: str) -> dict:
+        """종목명·업종(섹터) 조회 (ka10100 종목정보 조회). 찾지 못하면 빈 dict.
+        ※ 응답 필드명(name, upName)은 공식 문서로 확인하지 못한 추정이며 실제 호출 검증도 못 했다.
+        업종을 못 받으면 종목명만 ka10001의 stk_nm 으로 보완한다."""
+        headers = lambda api: {"authorization": f"Bearer {self._get_token()}", "api-id": api}  # noqa: E731
+        out: dict = {}
+        try:
+            res = self._post("/api/dostk/stkinfo", {"stk_cd": code}, headers("ka10100"))
+            if res.get("return_code", 0) == 0:
+                out = {"name": (res.get("name") or "").strip(), "sector": (res.get("upName") or "").strip()}
+        except Exception:
+            pass
+        if not out.get("name"):
+            try:
+                res = self._post("/api/dostk/stkinfo", {"stk_cd": code}, headers("ka10001"))
+                if res.get("return_code", 0) == 0 and res.get("stk_nm"):
+                    out["name"] = str(res["stk_nm"]).strip()
+            except Exception:
+                pass
+        return {k: v for k, v in out.items() if v}
+
 
 def get_provider(name: str = "sample", **kwargs):
     if name == "kiwoom":

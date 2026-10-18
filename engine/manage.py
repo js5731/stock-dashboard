@@ -43,3 +43,48 @@ def validate_recommendation(rec: dict) -> list[str]:
     elif opinion == "매도/회피" and (buy is not None or stop is not None):
         errors.append("매도/회피 의견은 매수가·손절가를 비워야 합니다.")
     return errors
+
+
+def suggest_from_code(code: str, provider, universe, quote=None) -> dict:
+    """종목코드로 폼 초기값을 만든다: 종목명·섹터(quote.stock_info API 우선, 없거나 실패하면 universe) + 시세 기반 전일종가·매수/매도/손절 제안.
+    찾지 못한 값은 키를 생략한다. 제안값은 검증 전 가설 계수(plan_long)로 계산한 참고값이다."""
+    code = code.strip()
+    out: dict = {}
+    hit = universe[universe["code"] == code]
+    if len(hit):
+        out["name"], out["sector"] = hit["name"].iloc[0], hit["sector"].iloc[0]
+    if quote is not None:
+        try:
+            out.update(quote.stock_info(code))  # API 값이 있는 항목만 universe 값을 덮어쓴다
+        except Exception:
+            pass
+    # 전일종가: 키움 기준가 → (없으면) 키움 현재가 → (없으면) 시세 제공자의 최근 종가
+    prev, source = None, None
+    if quote is not None:
+        for attr, label in (("prev_close", "전일종가"), ("latest_price", "현재가")):
+            try:
+                prev = getattr(quote, attr)(code)
+            except Exception:
+                prev = None
+            if prev:
+                source = label
+                break
+    try:
+        hist = provider.history(code, 30)
+        last = float(hist["close"].iloc[-1])
+        atr_value = pricing.atr(hist)
+    except Exception:
+        hist = None
+    if hist is None:
+        if prev:  # 변동성(ATR)을 알 수 없어 가격 제안은 하지 않는다
+            out.update(prev_close=int(prev), prev_source=source)
+        return out
+    if not prev:
+        prev, source = last, "시세 제공자"
+    atr_value *= prev / last  # 제공자 종가와 기준 가격이 다르면 ATR을 같은 비율로 맞춘다
+    plan = pricing.plan_long(prev, atr_value)
+    out.update(
+        prev_close=int(prev), prev_source=source, opinion="매수",
+        buy_price=plan.buy, sell_price=plan.sell, stop_price=plan.stop,
+    )
+    return out
